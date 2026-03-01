@@ -5,7 +5,8 @@
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   background: #0a0a0a;
   color: #e5e5e5;
   min-height: 100vh;
@@ -164,4 +165,176 @@ select option {
   margin-top: 20px;
   font-size: 14px;
   color: #666;
+}
+
+/* ── AI Notes Panel ─────────────────────────────────────── */
+
+.notes-panel {
+  margin-top: 24px;
+  background: #141414;
+  border: 1px solid #262626;
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+.notes-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid #1e1e1e;
+}
+
+.notes-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.notes-icon {
+  width: 28px;
+  height: 28px;
+  background: linear-gradient(135deg, #2563eb, #7c3aed);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.notes-header h2 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #e5e5e5;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.sentiment-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 20px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.sentiment-positive {
+  background: #14532d;
+  color: #4ade80;
+}
+.sentiment-negative {
+  background: #450a0a;
+  color: #f87171;
+}
+.sentiment-mixed {
+  background: #431407;
+  color: #fb923c;
+}
+.sentiment-neutral {
+  background: #1c1c1e;
+  color: #888;
+}
+
+.notes-loading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 28px 24px;
+  color: #666;
+  font-size: 14px;
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid #333;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.notes-content {
+  padding: 20px 24px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.notes-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+@media (max-width: 480px) {
+  .notes-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.notes-section h3 {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #555;
+  margin-bottom: 10px;
+}
+
+.notes-section p {
+  font-size: 14px;
+  color: #ccc;
+  line-height: 1.6;
+}
+
+.notes-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.notes-list li {
+  font-size: 13px;
+  color: #ccc;
+  line-height: 1.5;
+  padding-left: 16px;
+  position: relative;
+}
+
+.notes-list li::before {
+  content: "•";
+  position: absolute;
+  left: 0;
+  color: #444;
+}
+
+.action-list li::before {
+  content: "☐";
+  color: #2563eb;
+}
+
+.topics-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.topic-tag {
+  font-size: 12px;
+  padding: 4px 12px;
+  background: #1a1a2e;
+  border: 1px solid #2563eb33;
+  color: #6ea8fe;
+  border-radius: 20px;
+  font-weight: 500;
 }

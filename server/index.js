@@ -49,6 +49,7 @@ httpServer.on("upgrade", (req, socket, head) => {
 // Session state
 // ---------------------------------------------------------------------------
 const sessions = new Map();
+const sessionNotes = new Map(); // persists after session ends
 const ECHO_COOLDOWN_MS = 2000;
 
 // ---------------------------------------------------------------------------
@@ -77,6 +78,7 @@ app.post("/api/start-call", async (req, res) => {
     b2aOutputting: false,
     a2bOutputEndTime: 0,
     b2aOutputEndTime: 0,
+    transcript: [], // { role: 'A'|'B', lang: string, text: string, ts: number }
   });
 
   try {
@@ -98,7 +100,7 @@ app.post("/api/start-call", async (req, res) => {
     session.callSidB = callB.sid;
 
     console.log(
-      `[${sessionId}] Calling A: ${phoneA} (${languageA}), B: ${phoneB} (${languageB})`
+      `[${sessionId}] Calling A: ${phoneA} (${languageA}), B: ${phoneB} (${languageB})`,
     );
     res.json({ sessionId, status: "calling" });
   } catch (err) {
@@ -116,11 +118,30 @@ app.post("/api/end-call", async (req, res) => {
 
 app.get("/api/session/:id", (req, res) => {
   const session = sessions.get(req.params.id);
-  if (!session) return res.status(404).json({ error: "Not found" });
+  if (!session) {
+    // Session may have ended — check if notes exist
+    const notes = sessionNotes.get(req.params.id);
+    if (notes !== undefined) {
+      return res.json({
+        active: false,
+        bothConnected: false,
+        notesReady: notes !== null,
+      });
+    }
+    return res.status(404).json({ error: "Not found" });
+  }
   res.json({
     active: session.active,
     bothConnected: !!(session.streamA && session.streamB),
+    notesReady: false,
   });
+});
+
+app.get("/api/session/:id/notes", (req, res) => {
+  const notes = sessionNotes.get(req.params.id);
+  if (notes === undefined) return res.status(404).json({ error: "Not found" });
+  if (notes === null) return res.json({ status: "generating" });
+  res.json({ status: "ready", notes });
 });
 
 // ---------------------------------------------------------------------------
@@ -133,7 +154,7 @@ app.post("/twiml/connect", (req, res) => {
 
   twiml.say(
     { voice: "Polly.Amy" },
-    "Connected to translation service. Please wait while we connect the other party."
+    "Connected to translation service. Please wait while we connect the other party.",
   );
   twiml.pause({ length: 1 });
 
@@ -174,7 +195,7 @@ wss.on("connection", (ws) => {
         }
 
         console.log(
-          `[${sessionId}] Stream connected: role=${role}, streamSid=${streamSid}`
+          `[${sessionId}] Stream connected: role=${role}, streamSid=${streamSid}`,
         );
 
         if (role === "a") {
@@ -185,7 +206,7 @@ wss.on("connection", (ws) => {
 
         if (session.streamA && session.streamB && !session.openaiA2B) {
           console.log(
-            `[${sessionId}] Both parties connected — starting translation`
+            `[${sessionId}] Both parties connected — starting translation`,
           );
           startTranslation(session, sessionId);
         }
@@ -203,7 +224,7 @@ wss.on("connection", (ws) => {
           if (session.b2aOutputting) return;
           if (now - session.b2aOutputEndTime < ECHO_COOLDOWN_MS) return;
           session.openaiA2B.send(
-            JSON.stringify({ type: "input_audio_buffer.append", audio })
+            JSON.stringify({ type: "input_audio_buffer.append", audio }),
           );
         } else if (
           role === "b" &&
@@ -212,7 +233,7 @@ wss.on("connection", (ws) => {
           if (session.a2bOutputting) return;
           if (now - session.a2bOutputEndTime < ECHO_COOLDOWN_MS) return;
           session.openaiB2A.send(
-            JSON.stringify({ type: "input_audio_buffer.append", audio })
+            JSON.stringify({ type: "input_audio_buffer.append", audio }),
           );
         }
         break;
@@ -242,11 +263,19 @@ function startTranslation(session, sessionId) {
     outputStream: session.streamB,
     sessionId,
     direction: "A→B",
+    onTranscript: (text) => {
+      session.transcript.push({
+        role: "A",
+        lang: session.languageA,
+        text,
+        ts: Date.now(),
+      });
+    },
     onOutputStart: () => {
       session.a2bOutputting = true;
       if (session.openaiB2A?.readyState === WebSocket.OPEN) {
         session.openaiB2A.send(
-          JSON.stringify({ type: "input_audio_buffer.clear" })
+          JSON.stringify({ type: "input_audio_buffer.clear" }),
         );
       }
     },
@@ -255,7 +284,7 @@ function startTranslation(session, sessionId) {
       session.a2bOutputEndTime = Date.now();
       if (session.openaiB2A?.readyState === WebSocket.OPEN) {
         session.openaiB2A.send(
-          JSON.stringify({ type: "input_audio_buffer.clear" })
+          JSON.stringify({ type: "input_audio_buffer.clear" }),
         );
       }
     },
@@ -267,11 +296,19 @@ function startTranslation(session, sessionId) {
     outputStream: session.streamA,
     sessionId,
     direction: "B→A",
+    onTranscript: (text) => {
+      session.transcript.push({
+        role: "B",
+        lang: session.languageB,
+        text,
+        ts: Date.now(),
+      });
+    },
     onOutputStart: () => {
       session.b2aOutputting = true;
       if (session.openaiA2B?.readyState === WebSocket.OPEN) {
         session.openaiA2B.send(
-          JSON.stringify({ type: "input_audio_buffer.clear" })
+          JSON.stringify({ type: "input_audio_buffer.clear" }),
         );
       }
     },
@@ -280,7 +317,7 @@ function startTranslation(session, sessionId) {
       session.b2aOutputEndTime = Date.now();
       if (session.openaiA2B?.readyState === WebSocket.OPEN) {
         session.openaiA2B.send(
-          JSON.stringify({ type: "input_audio_buffer.clear" })
+          JSON.stringify({ type: "input_audio_buffer.clear" }),
         );
       }
     },
@@ -288,27 +325,27 @@ function startTranslation(session, sessionId) {
 }
 
 const LANGUAGE_CODES = {
-  "English": "en",
-  "Spanish": "es",
-  "French": "fr",
-  "German": "de",
-  "Italian": "it",
-  "Portuguese": "pt",
+  English: "en",
+  Spanish: "es",
+  French: "fr",
+  German: "de",
+  Italian: "it",
+  Portuguese: "pt",
   "Chinese (Mandarin)": "zh",
-  "Japanese": "ja",
-  "Korean": "ko",
-  "Arabic": "ar",
-  "Hindi": "hi",
-  "Russian": "ru",
-  "Dutch": "nl",
-  "Polish": "pl",
-  "Turkish": "tr",
-  "Vietnamese": "vi",
-  "Thai": "th",
-  "Indonesian": "id",
-  "Tagalog": "tl",
-  "Swahili": "sw",
-  "Hebrew": "he",
+  Japanese: "ja",
+  Korean: "ko",
+  Arabic: "ar",
+  Hindi: "hi",
+  Russian: "ru",
+  Dutch: "nl",
+  Polish: "pl",
+  Turkish: "tr",
+  Vietnamese: "vi",
+  Thai: "th",
+  Indonesian: "id",
+  Tagalog: "tl",
+  Swahili: "sw",
+  Hebrew: "he",
 };
 
 const WHISPER_HALLUCINATIONS = new Set([
@@ -356,6 +393,7 @@ function connectOpenAI({
   outputStream,
   sessionId,
   direction,
+  onTranscript,
   onOutputStart,
   onOutputEnd,
 }) {
@@ -366,7 +404,7 @@ function connectOpenAI({
         Authorization: `Bearer ${OPENAI_API_KEY}`,
         "OpenAI-Beta": "realtime=v1",
       },
-    }
+    },
   );
 
   let isSpeaking = false;
@@ -396,7 +434,7 @@ function connectOpenAI({
             silence_duration_ms: 700,
           },
         },
-      })
+      }),
     );
   });
 
@@ -413,7 +451,9 @@ function connectOpenAI({
     }
 
     // When transcription arrives, validate and create a manual translation.
-    if (event.type === "conversation.item.input_audio_transcription.completed") {
+    if (
+      event.type === "conversation.item.input_audio_transcription.completed"
+    ) {
       const transcript = (event.transcript || "").trim();
       console.log(`[${sessionId}] ${direction} HEARD: "${transcript}"`);
 
@@ -429,9 +469,13 @@ function connectOpenAI({
 
       const timeSinceOutput = Date.now() - lastOutputEndTime;
       if (lastOutputEndTime > 0 && timeSinceOutput < ECHO_COOLDOWN_MS) {
-        console.log(`[${sessionId}] ${direction} SKIP (echo cooldown, ${timeSinceOutput}ms)`);
+        console.log(
+          `[${sessionId}] ${direction} SKIP (echo cooldown, ${timeSinceOutput}ms)`,
+        );
         return;
       }
+
+      onTranscript?.(transcript);
 
       console.log(`[${sessionId}] ${direction} TRANSLATING to ${toLang}`);
       awaitingManualResponse = true;
@@ -442,7 +486,7 @@ function connectOpenAI({
             modalities: ["audio", "text"],
             instructions: `Translate the following text to ${toLang}. Speak ONLY the ${toLang} translation. Do not add any extra words, do not answer questions, do not respond — just translate:\n\n"${transcript}"`,
           },
-        })
+        }),
       );
     }
 
@@ -458,12 +502,15 @@ function connectOpenAI({
             event: "media",
             streamSid: outputStream.streamSid,
             media: { payload: event.delta },
-          })
+          }),
         );
       }
     }
 
-    if (event.type === "response.audio.done" || event.type === "response.done") {
+    if (
+      event.type === "response.audio.done" ||
+      event.type === "response.done"
+    ) {
       if (isSpeaking) {
         isSpeaking = false;
         lastOutputEndTime = Date.now();
@@ -479,7 +526,7 @@ function connectOpenAI({
       if (event.error?.code !== "response_cancel_not_active") {
         console.error(
           `[${sessionId}] OpenAI error (${direction}):`,
-          event.error
+          event.error,
         );
       }
     }
@@ -488,7 +535,7 @@ function connectOpenAI({
   ws.on("error", (err) => {
     console.error(
       `[${sessionId}] OpenAI WS error (${direction}):`,
-      err.message
+      err.message,
     );
   });
 
@@ -520,8 +567,85 @@ async function endSession(sessionId) {
     } catch {}
   }
 
+  const transcript = session.transcript || [];
   sessions.delete(sessionId);
   console.log(`[${sessionId}] Session ended`);
+
+  // Generate AI notes asynchronously; null = generating, string = ready
+  if (transcript.length > 0) {
+    sessionNotes.set(sessionId, null);
+    generateNotes(sessionId, transcript, session.languageA, session.languageB);
+  } else {
+    sessionNotes.set(sessionId, {
+      summary: "No conversation was recorded.",
+      keyPoints: [],
+      actionItems: [],
+      sentiment: "neutral",
+    });
+  }
+
+  // Clean up notes after 1 hour to avoid memory leaks
+  setTimeout(() => sessionNotes.delete(sessionId), 60 * 60 * 1000);
+}
+
+async function generateNotes(sessionId, transcript, languageA, languageB) {
+  try {
+    const formatted = transcript
+      .map(
+        (t) =>
+          `[${t.role === "A" ? `Party A (${languageA})` : `Party B (${languageB})`}]: ${t.text}`,
+      )
+      .join("\n");
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `You are a professional meeting notes assistant. Analyze the following phone call transcript (which was translated in real-time between ${languageA} and ${languageB}) and produce structured notes in JSON format.
+
+Return ONLY valid JSON with this exact structure:
+{
+  "summary": "2-3 sentence summary of the conversation",
+  "keyPoints": ["point 1", "point 2", ...],
+  "actionItems": ["action 1", "action 2", ...],
+  "sentiment": "positive" | "neutral" | "negative" | "mixed",
+  "topics": ["topic 1", "topic 2", ...]
+}
+
+Keep all output in English regardless of the call languages.`,
+          },
+          {
+            role: "user",
+            content: `Here is the call transcript:\n\n${formatted}`,
+          },
+        ],
+        temperature: 0.3,
+        response_format: { type: "json_object" },
+      }),
+    });
+
+    const data = await response.json();
+    const content = data.choices?.[0]?.message?.content;
+    const notes = JSON.parse(content);
+    sessionNotes.set(sessionId, notes);
+    console.log(`[${sessionId}] AI notes generated`);
+  } catch (err) {
+    console.error(`[${sessionId}] Failed to generate notes:`, err.message);
+    sessionNotes.set(sessionId, {
+      summary: "Notes could not be generated for this call.",
+      keyPoints: [],
+      actionItems: [],
+      sentiment: "neutral",
+      topics: [],
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
