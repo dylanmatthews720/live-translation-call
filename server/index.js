@@ -77,6 +77,8 @@ app.post("/api/start-call", async (req, res) => {
     b2aOutputting: false,
     a2bOutputEndTime: 0,
     b2aOutputEndTime: 0,
+    transcriptEntries: [],
+    sseClients: [],
   });
 
   try {
@@ -120,6 +122,22 @@ app.get("/api/session/:id", (req, res) => {
   res.json({
     active: session.active,
     bothConnected: !!(session.streamA && session.streamB),
+  });
+});
+
+app.get("/api/session/:id/events", (req, res) => {
+  const session = sessions.get(req.params.id);
+  if (!session) return res.status(404).end();
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  session.sseClients.push(res);
+  req.on("close", () => {
+    const idx = session.sseClients.indexOf(res);
+    if (idx !== -1) session.sseClients.splice(idx, 1);
   });
 });
 
@@ -236,12 +254,20 @@ wss.on("connection", (ws) => {
 // ---------------------------------------------------------------------------
 
 function startTranslation(session, sessionId) {
+  const onTranscriptEntry = (entry) => {
+    session.transcriptEntries.push(entry);
+    for (const client of session.sseClients) {
+      client.write("data: " + JSON.stringify(entry) + "\n\n");
+    }
+  };
+
   session.openaiA2B = connectOpenAI({
     fromLang: session.languageA,
     toLang: session.languageB,
     outputStream: session.streamB,
     sessionId,
     direction: "A→B",
+    onTranscriptEntry,
     onOutputStart: () => {
       session.a2bOutputting = true;
       if (session.openaiB2A?.readyState === WebSocket.OPEN) {
@@ -267,6 +293,7 @@ function startTranslation(session, sessionId) {
     outputStream: session.streamA,
     sessionId,
     direction: "B→A",
+    onTranscriptEntry,
     onOutputStart: () => {
       session.b2aOutputting = true;
       if (session.openaiA2B?.readyState === WebSocket.OPEN) {
@@ -356,6 +383,7 @@ function connectOpenAI({
   outputStream,
   sessionId,
   direction,
+  onTranscriptEntry,
   onOutputStart,
   onOutputEnd,
 }) {
@@ -372,6 +400,7 @@ function connectOpenAI({
   let isSpeaking = false;
   let lastOutputEndTime = 0;
   let awaitingManualResponse = false;
+  let pendingOriginal = null;
 
   ws.on("open", () => {
     console.log(`[${sessionId}] OpenAI session opened: ${direction}`);
@@ -433,6 +462,7 @@ function connectOpenAI({
         return;
       }
 
+      pendingOriginal = transcript;
       console.log(`[${sessionId}] ${direction} TRANSLATING to ${toLang}`);
       awaitingManualResponse = true;
       ws.send(
@@ -472,7 +502,21 @@ function connectOpenAI({
     }
 
     if (event.type === "response.audio_transcript.done") {
-      console.log(`[${sessionId}] ${direction} SAID: "${event.transcript}"`);
+      const translation = (event.transcript || "").trim();
+      console.log(`[${sessionId}] ${direction} SAID: "${translation}"`);
+      if (onTranscriptEntry && pendingOriginal != null) {
+        const entry = {
+          id: randomUUID(),
+          direction,
+          fromLang,
+          toLang,
+          original: pendingOriginal,
+          translation,
+          timestamp: Date.now(),
+        };
+        onTranscriptEntry(entry);
+        pendingOriginal = null;
+      }
     }
 
     if (event.type === "error") {
@@ -508,6 +552,13 @@ async function endSession(sessionId) {
   if (!session) return;
 
   session.active = false;
+
+  for (const client of session.sseClients || []) {
+    try {
+      client.end();
+    } catch {}
+  }
+  session.sseClients = [];
 
   for (const ws of [session.openaiA2B, session.openaiB2A]) {
     if (ws && ws.readyState !== WebSocket.CLOSED) ws.close();
