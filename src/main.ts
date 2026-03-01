@@ -155,17 +155,30 @@ function openTranscriptStream(sessionId: string): void {
 
   es.onmessage = (event) => {
     try {
-      const entry = JSON.parse(event.data) as TranscriptEntry;
-      transcriptEntries.push(entry);
-      renderTranscripts();
+      const data = typeof event.data === "string" ? event.data : "";
+      if (!data.trim()) return;
+      const entry = JSON.parse(data) as TranscriptEntry;
+      if (
+        entry &&
+        typeof entry.id === "string" &&
+        typeof entry.original === "string" &&
+        typeof entry.translation === "string"
+      ) {
+        if (!transcriptEntries.some((e) => e.id === entry.id)) {
+          transcriptEntries.push(entry);
+          renderTranscripts();
+        }
+      }
     } catch {
       // ignore parse errors
     }
   };
 
   es.onerror = () => {
-    es.close();
-    transcriptEventSource = null;
+    // Don't close on first error; EventSource may reconnect
+    if (es.readyState === EventSource.CLOSED) {
+      transcriptEventSource = null;
+    }
   };
 }
 
@@ -229,6 +242,22 @@ startBtn.onclick = async () => {
           clearPolling();
           statusEl.textContent = "Call ended";
           resetUI();
+          return;
+        }
+        // Poll transcript as fallback if SSE didn't deliver
+        const txRes = await fetch(`${SERVER_URL}/api/session/${currentSessionId}/transcript`);
+        if (txRes.ok) {
+          const { entries } = (await txRes.json()) as { entries: TranscriptEntry[] };
+          const knownIds = new Set(transcriptEntries.map((e) => e.id));
+          let changed = false;
+          for (const e of entries) {
+            if (!knownIds.has(e.id)) {
+              transcriptEntries.push(e);
+              knownIds.add(e.id);
+              changed = true;
+            }
+          }
+          if (changed) renderTranscripts();
         }
       } catch {
         // ignore

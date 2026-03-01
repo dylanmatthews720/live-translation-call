@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import compression from "compression";
 import { createServer } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import Twilio from "twilio";
@@ -29,6 +30,7 @@ const twilioClient = Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 const app = express();
 app.use(cors());
+app.use(compression());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -125,18 +127,31 @@ app.get("/api/session/:id", (req, res) => {
   });
 });
 
+app.get("/api/session/:id/transcript", (req, res) => {
+  const session = sessions.get(req.params.id);
+  if (!session) return res.status(404).json({ error: "Not found" });
+  res.json({ entries: session.transcriptEntries || [] });
+});
+
 app.get("/api/session/:id/events", (req, res) => {
   const session = sessions.get(req.params.id);
   if (!session) return res.status(404).end();
 
+  const send = (data) => {
+    res.write(data);
+    if (typeof res.flush === "function") res.flush();
+  };
+
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  if (req.socket) req.socket.setNoDelay(true);
   res.flushHeaders();
 
-  session.sseClients.push(res);
+  session.sseClients.push({ res, send });
   req.on("close", () => {
-    const idx = session.sseClients.indexOf(res);
+    const idx = session.sseClients.findIndex((c) => c.res === res);
     if (idx !== -1) session.sseClients.splice(idx, 1);
   });
 });
@@ -256,8 +271,13 @@ wss.on("connection", (ws) => {
 function startTranslation(session, sessionId) {
   const onTranscriptEntry = (entry) => {
     session.transcriptEntries.push(entry);
+    const payload = "data: " + JSON.stringify(entry) + "\n\n";
     for (const client of session.sseClients) {
-      client.write("data: " + JSON.stringify(entry) + "\n\n");
+      try {
+        client.send(payload);
+      } catch (err) {
+        console.warn("[SSE] send error:", err.message);
+      }
     }
   };
 
@@ -502,7 +522,11 @@ function connectOpenAI({
     }
 
     if (event.type === "response.audio_transcript.done") {
-      const translation = (event.transcript || "").trim();
+      const translation = (
+        event.transcript ??
+        event.output_item?.transcript ??
+        ""
+      ).trim();
       console.log(`[${sessionId}] ${direction} SAID: "${translation}"`);
       if (onTranscriptEntry && pendingOriginal != null) {
         const entry = {
@@ -555,7 +579,7 @@ async function endSession(sessionId) {
 
   for (const client of session.sseClients || []) {
     try {
-      client.end();
+      (client.res || client).end();
     } catch {}
   }
   session.sseClients = [];
