@@ -95,7 +95,7 @@ app.post("/api/start-call", async (req, res) => {
     session.callSidB = callB.sid;
 
     console.log(
-      `[${sessionId}] Calling A: ${phoneA} (${languageA}), B: ${phoneB} (${languageB})`
+      `[${sessionId}] Calling A: ${phoneA} (${languageA}), B: ${phoneB} (${languageB})`,
     );
     res.json({ sessionId, status: "calling" });
   } catch (err) {
@@ -130,7 +130,7 @@ app.post("/twiml/connect", (req, res) => {
 
   twiml.say(
     { voice: "Polly.Amy" },
-    "Connected to translation service. Please wait while we connect the other party."
+    "Connected to translation service. Please wait while we connect the other party.",
   );
   twiml.pause({ length: 1 });
 
@@ -154,7 +154,11 @@ wss.on("connection", (ws) => {
   let streamSid = null;
 
   ws.on("message", (raw) => {
+    console.log("message run");
+
     const msg = JSON.parse(raw.toString());
+
+    console.log("msg", msg);
 
     switch (msg.event) {
       case "start": {
@@ -171,7 +175,7 @@ wss.on("connection", (ws) => {
         }
 
         console.log(
-          `[${sessionId}] Stream connected: role=${role}, streamSid=${streamSid}`
+          `[${sessionId}] Stream connected: role=${role}, streamSid=${streamSid}`,
         );
 
         if (role === "a") {
@@ -182,7 +186,7 @@ wss.on("connection", (ws) => {
 
         if (session.streamA && session.streamB && !session.openaiA2B) {
           console.log(
-            `[${sessionId}] Both parties connected — starting translation`
+            `[${sessionId}] Both parties connected — starting translation`,
           );
           startTranslation(session, sessionId);
         }
@@ -190,17 +194,20 @@ wss.on("connection", (ws) => {
       }
 
       case "media": {
+        console.log("media run");
         const session = sessions.get(sessionId);
         if (!session) return;
 
         const audio = msg.media.payload;
+
+        console.log("audio", audio);
 
         if (role === "a" && session.openaiA2B?.readyState === WebSocket.OPEN) {
           // Don't forward A's audio while B→A is playing translated audio
           // (prevents A's microphone from picking up its own speaker output)
           if (session.b2aOutputting) return;
           session.openaiA2B.send(
-            JSON.stringify({ type: "input_audio_buffer.append", audio })
+            JSON.stringify({ type: "input_audio_buffer.append", audio }),
           );
         } else if (
           role === "b" &&
@@ -210,7 +217,7 @@ wss.on("connection", (ws) => {
           // (prevents B's microphone from picking up its own speaker output)
           if (session.a2bOutputting) return;
           session.openaiB2A.send(
-            JSON.stringify({ type: "input_audio_buffer.append", audio })
+            JSON.stringify({ type: "input_audio_buffer.append", audio }),
           );
         }
         break;
@@ -245,7 +252,7 @@ function startTranslation(session, sessionId) {
       // Clear any echo already buffered in B→A
       if (session.openaiB2A?.readyState === WebSocket.OPEN) {
         session.openaiB2A.send(
-          JSON.stringify({ type: "input_audio_buffer.clear" })
+          JSON.stringify({ type: "input_audio_buffer.clear" }),
         );
       }
     },
@@ -265,7 +272,7 @@ function startTranslation(session, sessionId) {
       // Clear any echo already buffered in A→B
       if (session.openaiA2B?.readyState === WebSocket.OPEN) {
         session.openaiA2B.send(
-          JSON.stringify({ type: "input_audio_buffer.clear" })
+          JSON.stringify({ type: "input_audio_buffer.clear" }),
         );
       }
     },
@@ -291,7 +298,7 @@ function connectOpenAI({
         Authorization: `Bearer ${OPENAI_API_KEY}`,
         "OpenAI-Beta": "realtime=v1",
       },
-    }
+    },
   );
 
   let isSpeaking = false;
@@ -327,7 +334,7 @@ RULES:
             silence_duration_ms: 500,
           },
         },
-      })
+      }),
     );
   });
 
@@ -346,12 +353,15 @@ RULES:
             event: "media",
             streamSid: outputStream.streamSid,
             media: { payload: event.delta },
-          })
+          }),
         );
       }
     }
 
-    if (event.type === "response.audio.done" || event.type === "response.done") {
+    if (
+      event.type === "response.audio.done" ||
+      event.type === "response.done"
+    ) {
       if (isSpeaking) {
         isSpeaking = false;
         onOutputEnd();
@@ -359,17 +369,14 @@ RULES:
     }
 
     if (event.type === "error") {
-      console.error(
-        `[${sessionId}] OpenAI error (${direction}):`,
-        event.error
-      );
+      console.error(`[${sessionId}] OpenAI error (${direction}):`, event.error);
     }
   });
 
   ws.on("error", (err) => {
     console.error(
       `[${sessionId}] OpenAI WS error (${direction}):`,
-      err.message
+      err.message,
     );
   });
 
