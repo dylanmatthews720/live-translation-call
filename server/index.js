@@ -49,6 +49,7 @@ httpServer.on("upgrade", (req, socket, head) => {
 // Session state
 // ---------------------------------------------------------------------------
 const sessions = new Map();
+const sessionNotes = new Map(); // persists after session ends; null = generating
 const ECHO_COOLDOWN_MS = 2000;
 
 // ---------------------------------------------------------------------------
@@ -123,6 +124,13 @@ app.get("/api/session/:id", (req, res) => {
     active: session.active,
     bothConnected: !!(session.streamA && session.streamB),
   });
+});
+
+app.get("/api/session/:id/notes", (req, res) => {
+  const notes = sessionNotes.get(req.params.id);
+  if (notes === undefined) return res.status(404).json({ error: "Not found" });
+  if (notes === null) return res.json({ status: "generating" });
+  res.json({ status: "ready", notes });
 });
 
 app.get("/api/session/:id/events", (req, res) => {
@@ -571,8 +579,82 @@ async function endSession(sessionId) {
     } catch {}
   }
 
+  const transcriptEntries = session.transcriptEntries || [];
+  const { languageA, languageB } = session;
   sessions.delete(sessionId);
   console.log(`[${sessionId}] Session ended`);
+
+  if (transcriptEntries.length > 0) {
+    sessionNotes.set(sessionId, null); // null = generating
+    generateNotes(sessionId, transcriptEntries, languageA, languageB);
+  } else {
+    sessionNotes.set(sessionId, {
+      summary: "No conversation was recorded.",
+      keyPoints: [],
+      actionItems: [],
+      sentiment: "neutral",
+      topics: [],
+    });
+  }
+
+  // Clean up notes after 1 hour to avoid memory leaks
+  setTimeout(() => sessionNotes.delete(sessionId), 60 * 60 * 1000);
+}
+
+async function generateNotes(sessionId, transcriptEntries, languageA, languageB) {
+  try {
+    const formatted = transcriptEntries
+      .map((e) => `[${e.direction === "A→B" ? `Party A (${languageA})` : `Party B (${languageB})`}]: ${e.original}`)
+      .join("\n");
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `You are a professional meeting notes assistant. Analyze the following phone call transcript (translated in real-time between ${languageA} and ${languageB}) and produce structured notes in JSON.
+
+Return ONLY valid JSON with this exact structure:
+{
+  "summary": "2-3 sentence summary of the conversation",
+  "keyPoints": ["point 1", "point 2"],
+  "actionItems": ["action 1", "action 2"],
+  "sentiment": "positive" | "neutral" | "negative" | "mixed",
+  "topics": ["topic 1", "topic 2"]
+}
+
+Keep all output in English regardless of call languages. If there are no action items or key points, return empty arrays.`,
+          },
+          {
+            role: "user",
+            content: `Call transcript:\n\n${formatted}`,
+          },
+        ],
+        temperature: 0.3,
+        response_format: { type: "json_object" },
+      }),
+    });
+
+    const data = await response.json();
+    const notes = JSON.parse(data.choices[0].message.content);
+    sessionNotes.set(sessionId, notes);
+    console.log(`[${sessionId}] AI notes generated`);
+  } catch (err) {
+    console.error(`[${sessionId}] Failed to generate notes:`, err.message);
+    sessionNotes.set(sessionId, {
+      summary: "Notes could not be generated for this call.",
+      keyPoints: [],
+      actionItems: [],
+      sentiment: "neutral",
+      topics: [],
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
