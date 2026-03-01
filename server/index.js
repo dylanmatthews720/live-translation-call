@@ -49,6 +49,7 @@ httpServer.on("upgrade", (req, socket, head) => {
 // Session state
 // ---------------------------------------------------------------------------
 const sessions = new Map();
+const ECHO_COOLDOWN_MS = 2000;
 
 // ---------------------------------------------------------------------------
 // REST API
@@ -74,6 +75,8 @@ app.post("/api/start-call", async (req, res) => {
     active: true,
     a2bOutputting: false,
     b2aOutputting: false,
+    a2bOutputEndTime: 0,
+    b2aOutputEndTime: 0,
   });
 
   try {
@@ -194,11 +197,11 @@ wss.on("connection", (ws) => {
         if (!session) return;
 
         const audio = msg.media.payload;
+        const now = Date.now();
 
         if (role === "a" && session.openaiA2B?.readyState === WebSocket.OPEN) {
-          // Don't forward A's audio while B→A is playing translated audio
-          // (prevents A's microphone from picking up its own speaker output)
           if (session.b2aOutputting) return;
+          if (now - session.b2aOutputEndTime < ECHO_COOLDOWN_MS) return;
           session.openaiA2B.send(
             JSON.stringify({ type: "input_audio_buffer.append", audio })
           );
@@ -206,9 +209,8 @@ wss.on("connection", (ws) => {
           role === "b" &&
           session.openaiB2A?.readyState === WebSocket.OPEN
         ) {
-          // Don't forward B's audio while A→B is playing translated audio
-          // (prevents B's microphone from picking up its own speaker output)
           if (session.a2bOutputting) return;
+          if (now - session.a2bOutputEndTime < ECHO_COOLDOWN_MS) return;
           session.openaiB2A.send(
             JSON.stringify({ type: "input_audio_buffer.append", audio })
           );
@@ -242,7 +244,6 @@ function startTranslation(session, sessionId) {
     direction: "A→B",
     onOutputStart: () => {
       session.a2bOutputting = true;
-      // Clear any echo already buffered in B→A
       if (session.openaiB2A?.readyState === WebSocket.OPEN) {
         session.openaiB2A.send(
           JSON.stringify({ type: "input_audio_buffer.clear" })
@@ -251,6 +252,12 @@ function startTranslation(session, sessionId) {
     },
     onOutputEnd: () => {
       session.a2bOutputting = false;
+      session.a2bOutputEndTime = Date.now();
+      if (session.openaiB2A?.readyState === WebSocket.OPEN) {
+        session.openaiB2A.send(
+          JSON.stringify({ type: "input_audio_buffer.clear" })
+        );
+      }
     },
   });
 
@@ -262,7 +269,6 @@ function startTranslation(session, sessionId) {
     direction: "B→A",
     onOutputStart: () => {
       session.b2aOutputting = true;
-      // Clear any echo already buffered in A→B
       if (session.openaiA2B?.readyState === WebSocket.OPEN) {
         session.openaiA2B.send(
           JSON.stringify({ type: "input_audio_buffer.clear" })
@@ -271,8 +277,77 @@ function startTranslation(session, sessionId) {
     },
     onOutputEnd: () => {
       session.b2aOutputting = false;
+      session.b2aOutputEndTime = Date.now();
+      if (session.openaiA2B?.readyState === WebSocket.OPEN) {
+        session.openaiA2B.send(
+          JSON.stringify({ type: "input_audio_buffer.clear" })
+        );
+      }
     },
   });
+}
+
+const LANGUAGE_CODES = {
+  "English": "en",
+  "Spanish": "es",
+  "French": "fr",
+  "German": "de",
+  "Italian": "it",
+  "Portuguese": "pt",
+  "Chinese (Mandarin)": "zh",
+  "Japanese": "ja",
+  "Korean": "ko",
+  "Arabic": "ar",
+  "Hindi": "hi",
+  "Russian": "ru",
+  "Dutch": "nl",
+  "Polish": "pl",
+  "Turkish": "tr",
+  "Vietnamese": "vi",
+  "Thai": "th",
+  "Indonesian": "id",
+  "Tagalog": "tl",
+  "Swahili": "sw",
+  "Hebrew": "he",
+};
+
+const WHISPER_HALLUCINATIONS = new Set([
+  "thank you",
+  "thank you.",
+  "thanks.",
+  "thank you for watching.",
+  "thank you for your time and attention.",
+  "thank you for watching",
+  "thank you for your time and attention",
+  "thanks for watching.",
+  "thanks for watching",
+  "please subscribe.",
+  "please subscribe",
+  "like and subscribe.",
+  "like and subscribe",
+  "bye.",
+  "bye",
+  "you",
+  "the end.",
+  "the end",
+  "let me know if you need any help.",
+  "let me know if you need any help",
+  "let me check.",
+  "let me check",
+  "how can i help you?",
+  "how can i help you",
+  "how can i assist you?",
+  "how can i assist you",
+  "sure.",
+  "sure",
+  "of course.",
+  "of course",
+  "i understand.",
+  "i understand",
+]);
+
+function isWhisperHallucination(text) {
+  return WHISPER_HALLUCINATIONS.has(text.toLowerCase());
 }
 
 function connectOpenAI({
@@ -295,6 +370,8 @@ function connectOpenAI({
   );
 
   let isSpeaking = false;
+  let lastOutputEndTime = 0;
+  let awaitingManualResponse = false;
 
   ws.on("open", () => {
     console.log(`[${sessionId}] OpenAI session opened: ${direction}`);
@@ -305,26 +382,18 @@ function connectOpenAI({
           modalities: ["audio", "text"],
           input_audio_format: "g711_ulaw",
           output_audio_format: "g711_ulaw",
+          input_audio_transcription: {
+            model: "whisper-1",
+            language: LANGUAGE_CODES[fromLang] || undefined,
+          },
           voice: "coral",
-          instructions: `You are a simultaneous interpreter. You are NOT an assistant. You do NOT converse. You are completely invisible.
-
-Your ONLY job: hear ${fromLang}, speak the ${toLang} translation. Nothing else.
-
-RULES:
-- Output ONLY the direct translation of what was spoken. Word for word meaning.
-- NEVER add your own words, opinions, greetings, or responses.
-- NEVER say things like "sure", "okay", "hello", "how can I help", etc.
-- NEVER answer questions — just translate them.
-- If someone says "How are you?" in ${fromLang}, you say the ${toLang} translation of "How are you?" — you do NOT answer the question.
-- Speak naturally in ${toLang} as if the original speaker were saying it themselves.
-- Match the speaker's tone — casual, formal, excited, serious.
-- Preserve all names, numbers, and places exactly.
-- If you hear silence or noise, say absolutely nothing.`,
+          temperature: 0.6,
+          instructions: `You translate ${fromLang} to ${toLang}. Output ONLY the translation.`,
           turn_detection: {
             type: "server_vad",
-            threshold: 0.6,
-            prefix_padding_ms: 200,
-            silence_duration_ms: 500,
+            threshold: 0.8,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 700,
           },
         },
       })
@@ -333,6 +402,49 @@ RULES:
 
   ws.on("message", (raw) => {
     const event = JSON.parse(raw.toString());
+
+    // Cancel EVERY auto-response. Only manual responses are allowed.
+    if (event.type === "response.created") {
+      if (!awaitingManualResponse) {
+        ws.send(JSON.stringify({ type: "response.cancel" }));
+        return;
+      }
+      awaitingManualResponse = false;
+    }
+
+    // When transcription arrives, validate and create a manual translation.
+    if (event.type === "conversation.item.input_audio_transcription.completed") {
+      const transcript = (event.transcript || "").trim();
+      console.log(`[${sessionId}] ${direction} HEARD: "${transcript}"`);
+
+      if (transcript.length < 2) {
+        console.log(`[${sessionId}] ${direction} SKIP (empty/noise)`);
+        return;
+      }
+
+      if (isWhisperHallucination(transcript)) {
+        console.log(`[${sessionId}] ${direction} SKIP (Whisper hallucination)`);
+        return;
+      }
+
+      const timeSinceOutput = Date.now() - lastOutputEndTime;
+      if (lastOutputEndTime > 0 && timeSinceOutput < ECHO_COOLDOWN_MS) {
+        console.log(`[${sessionId}] ${direction} SKIP (echo cooldown, ${timeSinceOutput}ms)`);
+        return;
+      }
+
+      console.log(`[${sessionId}] ${direction} TRANSLATING to ${toLang}`);
+      awaitingManualResponse = true;
+      ws.send(
+        JSON.stringify({
+          type: "response.create",
+          response: {
+            modalities: ["audio", "text"],
+            instructions: `Translate the following text to ${toLang}. Speak ONLY the ${toLang} translation. Do not add any extra words, do not answer questions, do not respond — just translate:\n\n"${transcript}"`,
+          },
+        })
+      );
+    }
 
     if (event.type === "response.audio.delta" && event.delta) {
       if (!isSpeaking) {
@@ -354,15 +466,22 @@ RULES:
     if (event.type === "response.audio.done" || event.type === "response.done") {
       if (isSpeaking) {
         isSpeaking = false;
+        lastOutputEndTime = Date.now();
         onOutputEnd();
       }
     }
 
+    if (event.type === "response.audio_transcript.done") {
+      console.log(`[${sessionId}] ${direction} SAID: "${event.transcript}"`);
+    }
+
     if (event.type === "error") {
-      console.error(
-        `[${sessionId}] OpenAI error (${direction}):`,
-        event.error
-      );
+      if (event.error?.code !== "response_cancel_not_active") {
+        console.error(
+          `[${sessionId}] OpenAI error (${direction}):`,
+          event.error
+        );
+      }
     }
   });
 
